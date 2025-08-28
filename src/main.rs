@@ -6,7 +6,30 @@ use tokio::net::UdpSocket; // 使用OsRng替代thread_rng，它实现了Send
 // DNS协议常量
 const DNS_PORT: u16 = 53;
 const TYPE_A: u16 = 1; // IPv4地址记录
+const TYPE_AAAA: u16 = 28; // IPv6地址记录
+const TYPE_MX: u16 = 15; // 邮件交换记录
+const TYPE_NS: u16 = 2;
+const TYPE_CNAME: u16 = 5;
+const TYPE_SOA: u16 = 6;
+const TYPE_PTR: u16 = 12;
+const TYPE_TXT: u16 = 16;
+const TYPE_SRV: u16 = 33;
 const CLASS_IN: u16 = 1; // Internet类
+
+// 解析DNS响应
+#[derive(Debug)]
+enum DnsRecord {
+    A(Ipv4Addr),
+    AAAA(std::net::Ipv6Addr),
+    MX(u16, String),
+    CNAME(String),
+    NS(String),
+    TXT(String),
+    PTR(String),
+    SOA(String),
+    SRV(u16, u16, u16, String),
+    Other(u16, Vec<u8>),
+}
 
 // DNS头部结构
 #[derive(Debug)]
@@ -51,23 +74,17 @@ impl DnsHeader {
 }
 
 // 构建DNS查询包
-fn build_query(domain: &str, query_id: u16) -> Vec<u8> {
+fn build_query(domain: &str, query_id: u16, qtype: u16) -> Vec<u8> {
     let mut query = Vec::new();
-
-    // 构建头部：标准查询，递归请求
     let header = DnsHeader {
         id: query_id,
-        flags: 0x0100, // 标准查询 + 递归请求
+        flags: 0x0100,
         qdcount: 1,
         ancount: 0,
         nscount: 0,
         arcount: 0,
     };
-
-    // 添加头部
     query.extend_from_slice(&header.to_bytes());
-
-    // 构建问题部分：域名
     let labels: Vec<&str> = domain.split('.').collect();
     for label in labels {
         if label.len() > 63 {
@@ -78,12 +95,9 @@ fn build_query(domain: &str, query_id: u16) -> Vec<u8> {
             query.extend_from_slice(label.as_bytes());
         }
     }
-    query.push(0); // 域名结束标记
-
-    // 添加类型和类
-    query.extend_from_slice(&TYPE_A.to_be_bytes());
+    query.push(0);
+    query.extend_from_slice(&qtype.to_be_bytes());
     query.extend_from_slice(&CLASS_IN.to_be_bytes());
-
     query
 }
 
@@ -133,46 +147,27 @@ fn parse_domain(response: &[u8], mut offset: usize) -> (String, usize) {
     (domain, ret_offset)
 }
 
-// 解析DNS响应
-fn parse_response(response: &[u8], query_id: u16) -> Option<Vec<Ipv4Addr>> {
-    // 检查响应长度至少包含头部
+fn parse_response(response: &[u8], query_id: u16) -> Option<Vec<DnsRecord>> {
     if response.len() < 12 {
         return None;
     }
-
-    // 解析头部
     let header = DnsHeader::from_bytes(response);
-
-    // 验证ID匹配
     if header.id != query_id {
         return None;
     }
-
-    // 检查响应标志
     if (header.flags & 0x8000) == 0 {
-        // 不是响应
         return None;
     }
-
     if (header.flags & 0x000F) != 0 {
-        // 有错误
         return None;
     }
-
-    // 跳过问题部分
     let mut offset = 12;
-
-    // 解析问题部分以获取域名
     for _ in 0..header.qdcount {
         let (_, new_offset) = parse_domain(response, offset);
         offset = new_offset;
-        offset += 4; // 跳过类型和类
+        offset += 4;
     }
-
-    println!("header: {:?}", header);
-
-    // 解析回答部分
-    let mut ips = Vec::new();
+    let mut records = Vec::new();
     for _ in 0..header.ancount {
         let (_, new_offset) = parse_domain(response, offset);
         offset = new_offset;
@@ -184,59 +179,112 @@ fn parse_response(response: &[u8], query_id: u16) -> Option<Vec<Ipv4Addr>> {
         let _ttl = u32::from_be_bytes(metadata[4..8].try_into().unwrap());
         let data_len = u16::from_be_bytes(metadata[8..10].try_into().unwrap()) as usize;
         offset += 10;
-        // 如果是A记录，解析IPv4地址
-        if type_ == TYPE_A && data_len == 4 {
-            let Some(ip_bytes) = response.get(offset..offset + 4) else {
-                continue;
-            };
-            let ip = Ipv4Addr::new(ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3]);
-            ips.push(ip);
+        match (type_, data_len) {
+            (TYPE_A, 4) => {
+                let Some(ip_bytes) = response.get(offset..offset + 4) else {
+                    continue;
+                };
+                records.push(DnsRecord::A(Ipv4Addr::new(
+                    ip_bytes[0],
+                    ip_bytes[1],
+                    ip_bytes[2],
+                    ip_bytes[3],
+                )));
+            }
+            (TYPE_AAAA, 16) => {
+                let Some(ip_bytes) = response.get(offset..offset + 16) else {
+                    continue;
+                };
+                let ipv6 = std::net::Ipv6Addr::from(<[u8; 16]>::try_from(ip_bytes).unwrap());
+                records.push(DnsRecord::AAAA(ipv6));
+            }
+            (TYPE_MX, _) if data_len >= 3 => {
+                let Some(mx_bytes) = response.get(offset..offset + data_len) else {
+                    continue;
+                };
+                let pref = u16::from_be_bytes([mx_bytes[0], mx_bytes[1]]);
+                let (mx_domain, _) = parse_domain(mx_bytes, 2);
+                records.push(DnsRecord::MX(pref, mx_domain));
+            }
+            (TYPE_CNAME, _) | (TYPE_NS, _) | (TYPE_PTR, _) => {
+                let Some(data) = response.get(offset..offset + data_len) else {
+                    continue;
+                };
+                let (name, _) = parse_domain(data, 0);
+                match type_ {
+                    TYPE_CNAME => records.push(DnsRecord::CNAME(name)),
+                    TYPE_NS => records.push(DnsRecord::NS(name)),
+                    TYPE_PTR => records.push(DnsRecord::PTR(name)),
+                    _ => {}
+                }
+            }
+            (TYPE_TXT, _) => {
+                let Some(data) = response.get(offset..offset + data_len) else {
+                    continue;
+                };
+                let txt_len = data.get(0).copied().unwrap_or(0) as usize;
+                let txt = if txt_len > 0 && txt_len + 1 <= data.len() {
+                    String::from_utf8_lossy(&data[1..1 + txt_len]).to_string()
+                } else {
+                    String::new()
+                };
+                records.push(DnsRecord::TXT(txt));
+            }
+            (TYPE_SOA, _) => {
+                let Some(data) = response.get(offset..offset + data_len) else {
+                    continue;
+                };
+                let (mname, off1) = parse_domain(data, 0);
+                let (rname, _off2) = parse_domain(data, off1);
+                records.push(DnsRecord::SOA(format!("mname={}, rname={}", mname, rname)));
+            }
+            (TYPE_SRV, _) if data_len >= 7 => {
+                let Some(data) = response.get(offset..offset + data_len) else {
+                    continue;
+                };
+                let priority = u16::from_be_bytes([data[0], data[1]]);
+                let weight = u16::from_be_bytes([data[2], data[3]]);
+                let port = u16::from_be_bytes([data[4], data[5]]);
+                let (target, _) = parse_domain(data, 6);
+                records.push(DnsRecord::SRV(priority, weight, port, target));
+            }
+            (_, _) => {
+                let Some(data) = response.get(offset..offset + data_len) else {
+                    continue;
+                };
+                records.push(DnsRecord::Other(type_, data.to_vec()));
+            }
         }
         offset += data_len;
     }
-
-    Some(ips)
+    Some(records)
 }
 
 // 异步解析域名
 async fn resolve_domain(
     domain: &str,
     dns_server: &str,
-) -> Result<Vec<Ipv4Addr>, Box<dyn std::error::Error>> {
-    // 创建UDP socket
+    qtype: u16,
+) -> Result<Vec<DnsRecord>, Box<dyn std::error::Error>> {
     let socket = UdpSocket::bind("0.0.0.0:0").await?;
-
-    // 解析DNS服务器地址
     let dns_addr: SocketAddr = format!("{}:{}", dns_server, DNS_PORT)
         .parse()
         .map_err(|_| format!("无效的DNS服务器地址: {}", dns_server))?;
-
-    // 生成随机查询ID
     let mut rng = OsRng;
-    let query_id: u16 = rng.try_next_u32().unwrap() as u16; // 使用try_next_u32并转换为u16
-
-    // 构建查询包
-    let query = build_query(domain, query_id);
-
-    // 发送查询
+    let query_id: u16 = rng.try_next_u32()? as u16;
+    let query = build_query(domain, query_id, qtype);
     socket.send_to(&query, &dns_addr).await?;
-
-    // 接收响应（设置超时）
-    let mut buf = [0u8; 512]; // DNS响应通常不超过512字节
+    let mut buf = [0u8; 512];
     let timeout = tokio::time::Duration::from_secs(5);
     let (len, _) = tokio::time::timeout(timeout, socket.recv_from(&mut buf))
         .await
         .map_err(|_| "DNS查询超时")?
         .map_err(|e| format!("接收数据失败: {}", e))?;
-
-    // 解析响应
-    let ips = parse_response(&buf[..len], query_id).ok_or("解析DNS响应失败")?;
-
-    if ips.is_empty() {
-        return Err("未找到A记录".into());
+    let records = parse_response(&buf[..len], query_id).ok_or("解析DNS响应失败")?;
+    if records.is_empty() {
+        return Err("未找到相关记录".into());
     }
-
-    Ok(ips)
+    Ok(records)
 }
 
 #[tokio::main]
@@ -244,52 +292,92 @@ async fn main() {
     // 获取命令行参数
     let args: Vec<String> = env::args().collect();
 
-    // 解析参数：支持指定DNS服务器，默认为8.8.8.8
-    let (domains, dns_server) = if args.len() >= 2 && args[1].starts_with("--dns=") {
-        // 使用let-else简化模式匹配（2024特性）
-        let Some(server) = args[1].split('=').nth(1) else {
-            eprintln!("无效的--dns参数格式，应为--dns=服务器地址");
-            std::process::exit(1);
-        };
-        (
-            args.iter().skip(2).cloned().collect::<Vec<String>>(),
-            server,
-        )
-    } else {
-        (args.iter().skip(1).cloned().collect(), "8.8.8.8")
-    };
+    // 解析参数：支持指定DNS服务器和记录类型，默认为A记录和8.8.8.8
+    let mut dns_server = "8.8.8.8";
+    let mut qtype = TYPE_A;
+    let mut domains = Vec::new();
+    for arg in args.iter().skip(1) {
+        if arg.starts_with("--dns=") {
+            if let Some(server) = arg.split('=').nth(1) {
+                dns_server = server;
+            }
+        } else if arg.starts_with("--type=") {
+            if let Some(t) = arg.split('=').nth(1) {
+                qtype = match t.to_uppercase().as_str() {
+                    "A" => TYPE_A,
+                    "AAAA" => TYPE_AAAA,
+                    "MX" => TYPE_MX,
+                    _ => {
+                        eprintln!("不支持的记录类型: {}，仅支持A/AAAA/MX", t);
+                        std::process::exit(1);
+                    }
+                };
+            }
+        } else {
+            domains.push(arg.clone());
+        }
+    }
 
     // 使用let-else简化条件判断（2024特性）
     if domains.is_empty() {
-        eprintln!("用法: {} [--dns=服务器地址] <域名1> <域名2> ...", args[0]);
         eprintln!(
-            "示例: {} --dns=114.114.114.114 example.com google.com",
+            "用法: {} [--dns=服务器地址] [--type=类型] <域名1> <域名2> ...",
+            args[0]
+        );
+        eprintln!(
+            "示例: {} --dns=114.114.114.114 --type=MX example.com google.com",
             args[0]
         );
         std::process::exit(1);
     }
 
-    println!("使用DNS服务器: {}\n", dns_server);
+    println!(
+        "使用DNS服务器: {}，记录类型: {:?}\n",
+        dns_server,
+        match qtype {
+            TYPE_A => "A",
+            TYPE_AAAA => "AAAA",
+            TYPE_MX => "MX",
+            _ => "Other",
+        }
+    );
 
-    // 并发解析所有域名
     let mut tasks = Vec::new();
     for domain in domains {
         let dns_server = dns_server.to_string();
-        // 使用2024版更简洁的闭包语法
+        let domain = domain.clone();
         tasks.push(tokio::spawn(async move {
-            match resolve_domain(&domain, &dns_server).await {
-                Ok(ips) => {
+            match resolve_domain(&domain, &dns_server, qtype).await {
+                Ok(records) => {
                     println!("{} 的解析结果:", domain);
-                    for ip in ips {
-                        println!("  {}", ip);
+                    for rec in records {
+                        match rec {
+                            DnsRecord::A(ip) => println!("  A: {}", ip),
+                            DnsRecord::AAAA(ipv6) => {
+                                println!("  AAAA: {}", ipv6)
+                            }
+                            DnsRecord::MX(pref, mx) => {
+                                println!("  MX: 优先级={} 域名={}", pref, mx)
+                            }
+                            DnsRecord::CNAME(name) => println!("  CNAME: {}", name),
+                            DnsRecord::NS(name) => println!("  NS: {}", name),
+                            DnsRecord::TXT(txt) => println!("  TXT: {}", txt),
+                            DnsRecord::PTR(name) => println!("  PTR: {}", name),
+                            DnsRecord::SOA(soa) => println!("  SOA: {}", soa),
+                            DnsRecord::SRV(priority, weight, port, target) => {
+                                println!(
+                                    "  SRV: 优先级={} 权重={} 端口={} 目标={}",
+                                    priority, weight, port, target
+                                )
+                            }
+                            DnsRecord::Other(t, data) => println!("  其他类型 {}: {:?}", t, data),
+                        }
                     }
                 }
                 Err(e) => eprintln!("解析 {} 失败: {}", domain, e),
             }
         }));
     }
-
-    // 等待所有任务完成
     for task in tasks {
         let _ = task.await;
     }
