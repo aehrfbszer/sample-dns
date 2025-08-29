@@ -4,7 +4,7 @@ use clap::Parser;
 #[command(version, about = "一个简单的DNS查询工具")]
 pub struct Args {
     /// 要查询的域名列表
-    #[arg(required = true)]
+    #[arg(required_unless_present = "daemon")]
     pub domains: Vec<String>,
 
     /// DNS服务器地址
@@ -18,6 +18,14 @@ pub struct Args {
     /// 禁用DNS缓存
     #[arg(long, default_value_t = false)]
     pub no_cache: bool,
+
+    /// 以守护进程模式运行
+    #[arg(long)]
+    pub daemon: bool,
+
+    /// 监听地址
+    #[arg(long, default_value = "127.0.0.1:53")]
+    pub listen: String,
 }
 
 #[derive(clap::ValueEnum, Clone, Debug)]

@@ -1,0 +1,26 @@
+[Unit]
+Description=DNS 缓存和查询服务
+After=network.target
+Documentation=https://github.com/aehrfbszer/sample-dns
+
+[Service]
+Type=simple
+User=dns
+Group=dns
+ExecStart=/usr/local/bin/sample-dns --daemon
+Restart=always
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+# 设置资源限制
+LimitNOFILE=65535
+# 安全设置
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+RestrictAddressFamilies=AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target
