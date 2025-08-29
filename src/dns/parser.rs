@@ -68,7 +68,7 @@ pub fn parse_domain(response: &[u8], mut offset: usize) -> Option<(String, usize
     Some((domain, if jumped { original_offset } else { offset }))
 }
 
-pub fn parse_response(response: &[u8], query_id: u16) -> Option<Vec<DnsRecord>> {
+pub fn parse_response(response: &[u8], query_id: u16) -> Option<(Vec<DnsRecord>, u32)> {
     let header = DnsHeader::from_bytes(response)?;
     if header.id != query_id || !header.is_response() || header.is_error() {
         return None;
@@ -81,13 +81,16 @@ pub fn parse_response(response: &[u8], query_id: u16) -> Option<Vec<DnsRecord>> 
     }
 
     let mut records = Vec::new();
+    let mut min_ttl = u32::MAX;
     for _ in 0..header.ancount {
         let (_, new_offset) = parse_domain(response, offset)?;
         offset = new_offset;
 
         let metadata = response.get(offset..offset + 10)?;
         let type_ = u16::from_be_bytes(metadata[0..2].try_into().ok()?);
+        let ttl = u32::from_be_bytes(metadata[4..8].try_into().ok()?);
         let data_len = u16::from_be_bytes(metadata[8..10].try_into().ok()?) as usize;
+        min_ttl = min_ttl.min(ttl);
         offset += 10;
 
         match (type_, data_len) {
@@ -155,5 +158,5 @@ pub fn parse_response(response: &[u8], query_id: u16) -> Option<Vec<DnsRecord>> 
         }
         offset += data_len;
     }
-    Some(records)
+    Some((records, if min_ttl == u32::MAX { 300 } else { min_ttl }))
 }

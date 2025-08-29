@@ -608,6 +608,8 @@ dependencies = [
  "axum",
  "clap",
  "hyper",
+ "once_cell",
+ "parking_lot",
  "rand",
  "serde",
  "serde_json",

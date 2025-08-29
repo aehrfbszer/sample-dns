@@ -14,6 +14,10 @@ pub struct Args {
     /// 记录类型
     #[arg(long, value_enum, default_value_t = QueryType::A)]
     pub record_type: QueryType,
+
+    /// 禁用DNS缓存
+    #[arg(long, default_value_t = false)]
+    pub no_cache: bool,
 }
 
 #[derive(clap::ValueEnum, Clone, Debug)]

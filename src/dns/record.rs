@@ -1,6 +1,6 @@
 use std::net::{Ipv4Addr, Ipv6Addr};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum DnsRecord {
     A(Ipv4Addr),
     AAAA(Ipv6Addr),

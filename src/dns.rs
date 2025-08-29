@@ -1,23 +1,35 @@
+pub mod cache;
 pub mod header;
 pub mod parser;
 pub mod record;
 pub mod types;
 
-use rand::rngs::OsRng;
 use rand::TryRngCore;
+use rand::rngs::OsRng;
 use std::net::SocketAddr;
 use tokio::net::UdpSocket;
 use tokio::time::Duration;
 
+use self::cache::DnsCache;
 use self::parser::{build_query, parse_response};
 use self::record::DnsRecord;
 use self::types::PORT;
+
+static DNS_CACHE: once_cell::sync::Lazy<DnsCache> = once_cell::sync::Lazy::new(DnsCache::new);
 
 pub async fn resolve_domain(
     domain: &str,
     dns_server: &str,
     qtype: u16,
+    use_cache: bool,
 ) -> Result<Vec<DnsRecord>, Box<dyn std::error::Error>> {
+    // 如果启用缓存，首先检查缓存
+    if use_cache {
+        if let Some(records) = DNS_CACHE.get(domain, qtype) {
+            return Ok(records);
+        }
+    }
+
     let socket = UdpSocket::bind("0.0.0.0:0").await?;
     let dns_addr: SocketAddr = format!("{}:{}", dns_server, PORT)
         .parse()
@@ -36,9 +48,18 @@ pub async fn resolve_domain(
         .map_err(|_| "DNS查询超时")?
         .map_err(|e| format!("接收数据失败: {}", e))?;
 
-    let records = parse_response(&buf[..len], query_id).ok_or("解析DNS响应失败")?;
+    let (records, ttl) = parse_response(&buf[..len], query_id).ok_or("解析DNS响应失败")?;
     if records.is_empty() {
         return Err("未找到相关记录".into());
     }
+
+    // 如果启用缓存，将结果存入缓存
+    if use_cache {
+        DNS_CACHE.insert(domain.to_string(), qtype, records.clone(), ttl);
+    }
     Ok(records)
+}
+
+pub fn clear_dns_cache() {
+    DNS_CACHE.clear_all();
 }

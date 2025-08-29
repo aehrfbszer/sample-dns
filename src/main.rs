@@ -34,8 +34,9 @@ async fn main() {
     for domain in &args.domains {
         let dns_server = args.dns.clone();
         let domain = domain.clone();
+        let use_cache = !args.no_cache;
         tasks.push(task::spawn(async move {
-            match dns::resolve_domain(&domain, &dns_server, record_type.as_u16()).await {
+            match dns::resolve_domain(&domain, &dns_server, record_type.as_u16(), use_cache).await {
                 Ok(records) => {
                     println!("{} 的解析结果:", domain);
                     for record in records {
