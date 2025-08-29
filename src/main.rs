@@ -1,20 +1,111 @@
+use clap::Parser;
 use rand::TryRngCore;
 use rand::rngs::OsRng;
-use std::env;
-use std::net::{Ipv4Addr, SocketAddr};
-use tokio::net::UdpSocket; // 使用OsRng替代thread_rng，它实现了Send
-// DNS协议常量
-const DNS_PORT: u16 = 53;
-const TYPE_A: u16 = 1; // IPv4地址记录
-const TYPE_AAAA: u16 = 28; // IPv6地址记录
-const TYPE_MX: u16 = 15; // 邮件交换记录
-const TYPE_NS: u16 = 2;
-const TYPE_CNAME: u16 = 5;
-const TYPE_SOA: u16 = 6;
-const TYPE_PTR: u16 = 12;
-const TYPE_TXT: u16 = 16;
-const TYPE_SRV: u16 = 33;
-const CLASS_IN: u16 = 1; // Internet类
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+use tokio::net::UdpSocket;
+
+/// DNS协议相关类型和常量
+mod dns {
+    use std::str::FromStr;
+
+    /// DNS记录类型解析错误
+    #[derive(Debug)]
+    pub struct ParseRecordTypeError {
+        message: String,
+    }
+
+    impl std::fmt::Display for ParseRecordTypeError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "{}", self.message)
+        }
+    }
+
+    impl std::error::Error for ParseRecordTypeError {}
+
+    /// DNS记录类型
+    #[derive(Debug, Clone, Copy)]
+    pub enum RecordType {
+        A = 1,
+        NS = 2,
+        CNAME = 5,
+        SOA = 6,
+        PTR = 12,
+        MX = 15,
+        TXT = 16,
+        AAAA = 28,
+        SRV = 33,
+    }
+
+    impl FromStr for RecordType {
+        type Err = ParseRecordTypeError;
+
+        fn from_str(s: &str) -> Result<Self, Self::Err> {
+            match s.to_uppercase().as_str() {
+                "A" => Ok(Self::A),
+                "AAAA" => Ok(Self::AAAA),
+                "MX" => Ok(Self::MX),
+                "CNAME" => Ok(Self::CNAME),
+                "NS" => Ok(Self::NS),
+                "TXT" => Ok(Self::TXT),
+                "PTR" => Ok(Self::PTR),
+                "SOA" => Ok(Self::SOA),
+                "SRV" => Ok(Self::SRV),
+                _ => Err(ParseRecordTypeError {
+                    message: format!("不支持的记录类型: {}", s),
+                }),
+            }
+        }
+    }
+
+    impl RecordType {
+        /// 获取记录类型的数值
+        pub fn as_u16(&self) -> u16 {
+            *self as u16
+        }
+
+    
+    }
+
+    /// DNS端口号
+    pub const PORT: u16 = 53;
+    /// DNS Internet类
+    pub const CLASS_IN: u16 = 1;
+}
+
+#[derive(Parser, Debug)]
+#[command(version, about = "一个简单的DNS查询工具")]
+struct Args {
+    /// 要查询的域名列表
+    #[arg(required = true)]
+    domains: Vec<String>,
+
+    /// DNS服务器地址
+    #[arg(long, default_value = "8.8.8.8")]
+    dns: String,
+
+    /// 记录类型
+    #[arg(long, value_enum, default_value_t = QueryType::A)]
+    record_type: QueryType,
+}
+
+#[derive(clap::ValueEnum, Clone, Debug)]
+enum QueryType {
+    A,
+    AAAA,
+    MX,
+    CNAME,
+    NS,
+    TXT,
+    PTR,
+    SOA,
+    SRV,
+}
+
+impl std::fmt::Display for QueryType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
 
 // 解析DNS响应
 #[derive(Debug)]
@@ -97,7 +188,7 @@ fn build_query(domain: &str, query_id: u16, qtype: u16) -> Vec<u8> {
     }
     query.push(0);
     query.extend_from_slice(&qtype.to_be_bytes());
-    query.extend_from_slice(&CLASS_IN.to_be_bytes());
+    query.extend_from_slice(&dns::CLASS_IN.to_be_bytes());
     query
 }
 
@@ -180,7 +271,7 @@ fn parse_response(response: &[u8], query_id: u16) -> Option<Vec<DnsRecord>> {
         let data_len = u16::from_be_bytes(metadata[8..10].try_into().unwrap()) as usize;
         offset += 10;
         match (type_, data_len) {
-            (TYPE_A, 4) => {
+            (t, 4) if t == dns::RecordType::A.as_u16() => {
                 let Some(ip_bytes) = response.get(offset..offset + 4) else {
                     continue;
                 };
@@ -191,14 +282,14 @@ fn parse_response(response: &[u8], query_id: u16) -> Option<Vec<DnsRecord>> {
                     ip_bytes[3],
                 )));
             }
-            (TYPE_AAAA, 16) => {
+            (t, 16) if t == dns::RecordType::AAAA.as_u16() => {
                 let Some(ip_bytes) = response.get(offset..offset + 16) else {
                     continue;
                 };
-                let ipv6 = std::net::Ipv6Addr::from(<[u8; 16]>::try_from(ip_bytes).unwrap());
+                let ipv6 = Ipv6Addr::from(<[u8; 16]>::try_from(ip_bytes).unwrap());
                 records.push(DnsRecord::AAAA(ipv6));
             }
-            (TYPE_MX, _) if data_len >= 3 => {
+            (t, _) if t == dns::RecordType::MX.as_u16() && data_len >= 3 => {
                 let Some(mx_bytes) = response.get(offset..offset + data_len) else {
                     continue;
                 };
@@ -206,19 +297,24 @@ fn parse_response(response: &[u8], query_id: u16) -> Option<Vec<DnsRecord>> {
                 let (mx_domain, _) = parse_domain(mx_bytes, 2);
                 records.push(DnsRecord::MX(pref, mx_domain));
             }
-            (TYPE_CNAME, _) | (TYPE_NS, _) | (TYPE_PTR, _) => {
+            (t, _)
+                if matches!(t, t if t == dns::RecordType::CNAME.as_u16() 
+                              || t == dns::RecordType::NS.as_u16() 
+                              || t == dns::RecordType::PTR.as_u16()) =>
+            {
                 let Some(data) = response.get(offset..offset + data_len) else {
                     continue;
                 };
                 let (name, _) = parse_domain(data, 0);
-                match type_ {
-                    TYPE_CNAME => records.push(DnsRecord::CNAME(name)),
-                    TYPE_NS => records.push(DnsRecord::NS(name)),
-                    TYPE_PTR => records.push(DnsRecord::PTR(name)),
-                    _ => {}
+                if t == dns::RecordType::CNAME.as_u16() {
+                    records.push(DnsRecord::CNAME(name));
+                } else if t == dns::RecordType::NS.as_u16() {
+                    records.push(DnsRecord::NS(name));
+                } else if t == dns::RecordType::PTR.as_u16() {
+                    records.push(DnsRecord::PTR(name));
                 }
             }
-            (TYPE_TXT, _) => {
+            (t, _) if t == dns::RecordType::TXT.as_u16() => {
                 let Some(data) = response.get(offset..offset + data_len) else {
                     continue;
                 };
@@ -230,7 +326,7 @@ fn parse_response(response: &[u8], query_id: u16) -> Option<Vec<DnsRecord>> {
                 };
                 records.push(DnsRecord::TXT(txt));
             }
-            (TYPE_SOA, _) => {
+            (t, _) if t == dns::RecordType::SOA.as_u16() => {
                 let Some(data) = response.get(offset..offset + data_len) else {
                     continue;
                 };
@@ -238,7 +334,7 @@ fn parse_response(response: &[u8], query_id: u16) -> Option<Vec<DnsRecord>> {
                 let (rname, _off2) = parse_domain(data, off1);
                 records.push(DnsRecord::SOA(format!("mname={}, rname={}", mname, rname)));
             }
-            (TYPE_SRV, _) if data_len >= 7 => {
+            (t, _) if t == dns::RecordType::SRV.as_u16() && data_len >= 7 => {
                 let Some(data) = response.get(offset..offset + data_len) else {
                     continue;
                 };
@@ -267,7 +363,7 @@ async fn resolve_domain(
     qtype: u16,
 ) -> Result<Vec<DnsRecord>, Box<dyn std::error::Error>> {
     let socket = UdpSocket::bind("0.0.0.0:0").await?;
-    let dns_addr: SocketAddr = format!("{}:{}", dns_server, DNS_PORT)
+    let dns_addr: SocketAddr = format!("{}:{}", dns_server, dns::PORT)
         .parse()
         .map_err(|_| format!("无效的DNS服务器地址: {}", dns_server))?;
     let mut rng = OsRng;
@@ -289,65 +385,33 @@ async fn resolve_domain(
 
 #[tokio::main]
 async fn main() {
-    // 获取命令行参数
-    let args: Vec<String> = env::args().collect();
+    // 使用clap解析命令行参数
+    let args = Args::parse();
 
-    // 解析参数：支持指定DNS服务器和记录类型，默认为A记录和8.8.8.8
-    let mut dns_server = "8.8.8.8";
-    let mut qtype = TYPE_A;
-    let mut domains = Vec::new();
-    for arg in args.iter().skip(1) {
-        if arg.starts_with("--dns=") {
-            if let Some(server) = arg.split('=').nth(1) {
-                dns_server = server;
-            }
-        } else if arg.starts_with("--type=") {
-            if let Some(t) = arg.split('=').nth(1) {
-                qtype = match t.to_uppercase().as_str() {
-                    "A" => TYPE_A,
-                    "AAAA" => TYPE_AAAA,
-                    "MX" => TYPE_MX,
-                    _ => {
-                        eprintln!("不支持的记录类型: {}，仅支持A/AAAA/MX", t);
-                        std::process::exit(1);
-                    }
-                };
-            }
-        } else {
-            domains.push(arg.clone());
-        }
-    }
-
-    // 使用let-else简化条件判断（2024特性）
-    if domains.is_empty() {
-        eprintln!(
-            "用法: {} [--dns=服务器地址] [--type=类型] <域名1> <域名2> ...",
-            args[0]
-        );
-        eprintln!(
-            "示例: {} --dns=114.114.114.114 --type=MX example.com google.com",
-            args[0]
-        );
-        std::process::exit(1);
-    }
+    // 转换记录类型为DNS类型值
+    let record_type = match args.record_type {
+        QueryType::A => dns::RecordType::A,
+        QueryType::AAAA => dns::RecordType::AAAA,
+        QueryType::MX => dns::RecordType::MX,
+        QueryType::CNAME => dns::RecordType::CNAME,
+        QueryType::NS => dns::RecordType::NS,
+        QueryType::TXT => dns::RecordType::TXT,
+        QueryType::PTR => dns::RecordType::PTR,
+        QueryType::SOA => dns::RecordType::SOA,
+        QueryType::SRV => dns::RecordType::SRV,
+    };
 
     println!(
-        "使用DNS服务器: {}，记录类型: {:?}\n",
-        dns_server,
-        match qtype {
-            TYPE_A => "A",
-            TYPE_AAAA => "AAAA",
-            TYPE_MX => "MX",
-            _ => "Other",
-        }
+        "使用DNS服务器: {}，记录类型: {}\n",
+        args.dns, args.record_type
     );
 
     let mut tasks = Vec::new();
-    for domain in domains {
-        let dns_server = dns_server.to_string();
+    for domain in &args.domains {
+        let dns_server = args.dns.clone();
         let domain = domain.clone();
         tasks.push(tokio::spawn(async move {
-            match resolve_domain(&domain, &dns_server, qtype).await {
+            match resolve_domain(&domain, &dns_server, record_type.as_u16()).await {
                 Ok(records) => {
                     println!("{} 的解析结果:", domain);
                     for rec in records {
