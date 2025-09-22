@@ -7,7 +7,7 @@ mod dns;
 mod logging;
 mod server;
 
-use cli::{Args, QueryType};
+use cli::Args;
 use dns::types::RecordType;
 use server::DnsServer;
 
@@ -25,21 +25,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Ok(())
     } else {
         // 命令行模式
-        let record_type = match args.record_type {
-            QueryType::A => RecordType::A,
-            QueryType::AAAA => RecordType::AAAA,
-            QueryType::MX => RecordType::MX,
-            QueryType::CNAME => RecordType::CNAME,
-            QueryType::NS => RecordType::NS,
-            QueryType::TXT => RecordType::TXT,
-            QueryType::PTR => RecordType::PTR,
-            QueryType::SOA => RecordType::SOA,
-            QueryType::SRV => RecordType::SRV,
-        };
+        let record_type: RecordType = args.record_type.into();
 
         println!(
-            "使用DNS服务器: {}，记录类型: {}\n",
-            args.dns, args.record_type
+            "使用DNS服务器: {}，记录类型: {:?}\n",
+            args.dns, record_type
         );
 
         let mut tasks = Vec::new();

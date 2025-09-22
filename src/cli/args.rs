@@ -1,5 +1,7 @@
 use clap::Parser;
 
+use crate::dns::types::RecordType;
+
 #[derive(Parser, Debug)]
 #[command(version, about = "一个简单的DNS查询工具")]
 pub struct Args {
@@ -24,7 +26,7 @@ pub struct Args {
     pub daemon: bool,
 
     /// 监听地址
-    #[arg(long, default_value = "127.0.0.1:53")]
+    #[arg(long, default_value = "127.0.0.1:0")]
     pub listen: String,
 }
 
@@ -44,5 +46,21 @@ pub enum QueryType {
 impl std::fmt::Display for QueryType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{:?}", self)
+    }
+}
+
+impl Into<RecordType> for QueryType {
+    fn into(self) -> RecordType {
+        match self {
+            QueryType::A => RecordType::A,
+            QueryType::AAAA => RecordType::AAAA,
+            QueryType::MX => RecordType::MX,
+            QueryType::CNAME => RecordType::CNAME,
+            QueryType::NS => RecordType::NS,
+            QueryType::TXT => RecordType::TXT,
+            QueryType::PTR => RecordType::PTR,
+            QueryType::SOA => RecordType::SOA,
+            QueryType::SRV => RecordType::SRV,
+        }
     }
 }

@@ -15,7 +15,7 @@ impl std::fmt::Display for ParseRecordTypeError {
 impl std::error::Error for ParseRecordTypeError {}
 
 /// DNS记录类型
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecordType {
     A = 1,
     NS = 2,

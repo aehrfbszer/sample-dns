@@ -3,6 +3,7 @@ pub mod header;
 pub mod parser;
 pub mod record;
 pub mod types;
+mod tests;
 
 use rand::TryRngCore;
 use rand::rngs::OsRng;
@@ -22,7 +23,7 @@ pub async fn resolve_domain(
     dns_server: &str,
     qtype: u16,
     use_cache: bool,
-) -> Result<Vec<DnsRecord>, Box<dyn std::error::Error>> {
+) -> Result<Vec<DnsRecord>, Box<dyn std::error::Error + Send + Sync>> {
     // 如果启用缓存，首先检查缓存
     if use_cache {
         if let Some(records) = DNS_CACHE.get(domain, qtype) {
